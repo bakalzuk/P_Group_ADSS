@@ -18,6 +18,9 @@ public class Main {
         InventoryMenu ui = new InventoryMenu(service);
         ui.start();
 
+
+
+
         System.out.print("Rotem");
     }
 }
