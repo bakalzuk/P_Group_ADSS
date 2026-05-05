@@ -1,0 +1,165 @@
+package ServiceLayer;
+
+import DomainLayer.*;
+import java.time.LocalDate;
+import java.util.*;
+import java.util.stream.Collectors;
+
+
+/**
+ * Service class handling shift scheduling logic.
+ * Manages shift history, employee availability, and complex assignment rules (e.g., double shifts, qualifications).
+ */
+public class ShiftService {
+    private List<Shift> shiftHistory;
+    private EmployeeService employeeService; // Reference to the employee manager
+
+    public ShiftService(EmployeeService employeeService) {
+        this.shiftHistory = new ArrayList<>();
+        this.employeeService = employeeService;
+    }
+
+    //Checks if an employee is available based on their day off and shift constraints.
+    public boolean isEmployeeAvailableForShift(Employee emp, LocalDate date, char type) {
+        if (emp.getDay_off() != null && date.getDayOfWeek().equals(emp.getDay_off())) {
+            return false; // Not available on their day off
+        }
+
+        if (emp.getCurrentConstraints() == null || emp.getCurrentConstraints().isEmpty()) {
+            return true;
+        }
+
+        return emp.getCurrentConstraints().stream()
+                .filter(c -> c.getDate().equals(date)) // Only look at constraints for the same day
+                .noneMatch(c -> {
+                    if (type == 'm') return c.blocksMorningShift();
+                    if (type == 'e') return c.blocksEveningShift();
+                    return false;
+                });
+    }
+
+    // The main logic for assigning an employee to a specific shift
+    public String assignEmployeeToShift(int employeeId, LocalDate date, char type, String role, int extraHours) {
+        // 1. First, check if employee and shift even exist (Avoid NullPointerException)
+        Employee emp = employeeService.getEmployeeById(employeeId);
+        if (emp == null) return "Error: Employee not found.";
+
+
+        // 2. Double Shift Check
+        boolean alreadyWorkingThatDay = false;
+        for (Shift s : this.shiftHistory) {
+            // We check if the employee is already assigned to ANY shift on that date
+            if (s.getDate().equals(date) && s.isEmployeeAssigned(employeeId)) {
+                alreadyWorkingThatDay = true;
+                break;
+            }
+        }
+
+        if (alreadyWorkingThatDay) {
+            boolean approvedDouble = false;
+            // Search specifically for a constraint that allows double shift on THIS date
+            for (Constraint c : emp.getCurrentConstraints()) {
+                if (c.getDate().equals(date) && c.isDoubleShiftApproved()) {
+                    approvedDouble = true;
+                    break;
+                }
+            }
+
+            if (!approvedDouble) {
+                return "Error: Employee " + emp.getName() + " is already working on this date and did NOT approve a double shift in their constraints.";
+            }
+        }
+        Shift shift =  findShiftByDateAndType(date, type);
+        if (shift == null) return "Error: Shift not found.";
+
+        // 3. Qualification Check
+        if (!Arrays.asList(emp.getRoles()).contains(role)) {
+            return "Error: Employee is not qualified for " + role;
+        }
+
+        // 4. Availability Check (Morning/Evening specific constraint)
+        if (!isEmployeeAvailableForShift(emp, date, type)) {
+            return "Error: Employee has a constraint for this specific shift (" + type + ").";
+        }
+        // 5. Final Assignment
+        shift.setShift_roles(emp, role);
+
+        if (extraHours > 0) {
+            shift.addExtraHoursAssignment(emp, extraHours);
+        }
+        return "Success: " + emp.getName() + " assigned as " + role;
+    }
+
+
+    // Standard Shift Management Methods
+    public void createShift(LocalDate date, char type, Employee manager, Map<String, Integer> model) {
+        shiftHistory.add(new Shift(date, type, manager, model));
+    }
+// finds all available employees for shift
+    public List<Employee> getAvailableEmployeesForShift(LocalDate date, char type) {
+        List<Employee> allEmployees = employeeService.getAllEmployees();
+
+        return allEmployees.stream().filter(emp -> isEmployeeAvailableForShift(emp, date, type)).collect(Collectors.toList());
+    }
+
+    //Searches for a specific shift in the history based on date and time of day.
+    public Shift findShiftByDateAndType(LocalDate date, char type) {
+        return shiftHistory.stream().filter(s -> s.getDate().equals(date) && s.getType() == type).findFirst().orElse(null);
+    }
+
+    //Returns a copy of the shift history list
+    public List<Shift> getShiftHistory() {
+        return new ArrayList<>(shiftHistory);
+    }
+
+    public void addShiftToHistory(Shift shift) {
+        this.shiftHistory.add(shift);
+    }
+
+    // Extracts the maximum extra hours an employee offered to work for a specific date.
+    public int getPotentialExtraHours(Employee emp, LocalDate date) {
+        // method to extract the extra hours defined in employee's constraints for a specific day
+        return emp.getCurrentConstraints().stream().filter(c -> c.getDate().equals(date)).mapToInt(Constraint::getExtraHours).max().orElse(0);
+    }
+
+    // Handles manager-forced assignments.
+    public String assignExceptionalShift(int employeeId, LocalDate date, char type, String role) {
+        Employee emp = employeeService.getEmployeeById(employeeId);
+        Shift shift = findShiftByDateAndType(date, type);
+
+        if (emp == null || shift == null) return "Error: Employee or Shift not found.";
+
+        // Qualification check
+        if (!Arrays.asList(emp.getRoles()).contains(role)) return "Error: Qualification mismatch.";
+
+        // CHANGE: Find the specific constraint for this date
+        Constraint constraint = emp.getCurrentConstraints().stream()
+                .filter(c -> c.getDate().equals(date))
+                .findFirst()
+                .orElse(null);
+
+        // Logic: If there's no constraint, it's a regular assignment.
+        // If there is one, check if it's changeable.
+        if (constraint != null && !constraint.isChangeable()) {
+            return "Error: This is a HARD constraint. Assignment is strictly blocked.";
+        }
+
+        // Assign even if a flexible constraint exists
+        shift.setShift_roles(emp, role);
+        return "Success: Exceptional assignment completed for " + emp.getName();
+    }
+
+    //Checks if a specific employee has authorized double shifts for a given date.
+    public boolean canWorkDoubleShift(int employeeId, LocalDate date) {
+        Employee emp = employeeService.getEmployeeById(employeeId);
+        if (emp == null) return false;
+
+        // Search for a constraint on this specific date
+        for (Constraint c : emp.getCurrentConstraints()) {
+            if (c.getDate().equals(date)) {
+                return c.isDoubleShiftApproved(); // Returns true only if the employee checked the box
+            }
+        }
+        return false;
+    }
+}
